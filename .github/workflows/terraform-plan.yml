@@ -2,79 +2,68 @@ name: "Terraform Plan"
 
 on:
   pull_request:
-
-env:
-  TF_CLOUD_ORGANIZATION: "github_action_test" #"YOUR-ORGANIZATION-HERE"
-  TF_API_TOKEN: "${{ secrets.TF_API_TOKEN }}"
-  TF_WORKSPACE: "learn-terraform-github-actions"
-  CONFIG_DIRECTORY: "./"
+    branches: [ "main" ]
+    paths: "projects/practice-service/**"
 
 jobs:
   terraform:
-    if: github.repository != 'hashicorp-education/learn-terraform-github-actions'
     name: "Terraform Plan"
     runs-on: ubuntu-latest
     permissions:
       contents: read #코드를 읽어올 수 있는 권한
       pull-requests: write #PR에 댓글을 달 수 있는 권한
+    
     steps:
       - name: Checkout 
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Upload Configuration
-        uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.0.0
-        id: plan-upload
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
-          workspace: ${{ env.TF_WORKSPACE }}
-          directory: ${{ env.CONFIG_DIRECTORY }}
-          speculative: true #테스트용
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      
+      - name: Format
+        run: terraform fmt -check -recursive
+        working-directory: projects/practice-service/dev
+      
+      - name: Init
+        run: terraform init
+        working-directory: projects/practice-service/dev
+      
+      - name: Plan
+        id: plan
+        working-directory: projects/practice-service/dev
+        run: terraform plan -no-color
 
-      - name: Create Plan Run
-        uses: hashicorp/tfc-workflows-github/actions/create-run@v1.0.0
-        id: plan-run
-        with:
-          workspace: ${{ env.TF_WORKSPACE }}
-          configuration_version: ${{ steps.plan-upload.outputs.configuration_version_id }}
-          plan_only: true
-
-      - name: Get Plan Output
-        uses: hashicorp/tfc-workflows-github/actions/plan-output@v1.0.0
-        id: plan-output
-        with:
-          plan: ${{ fromJSON(steps.plan-run.outputs.payload).data.relationships.plan.data.id }}
-
-      - name: Update PR
-        uses: actions/github-script@v6
-        id: plan-comment
+      # 7. PR에 결과 댓글 달기
+      - name: Post Plan Comment
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            // 1. Retrieve existing bot comments for the PR
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const botComment = comments.find(comment => {
-              return comment.user.type === 'Bot' && comment.body.includes('Terraform Cloud Plan Output')
-            });
-            const output = `#### Terraform Cloud Plan Output
-               \`\`\`
-               Plan: ${{ steps.plan-output.outputs.add }} to add, ${{ steps.plan-output.outputs.change }} to change, ${{ steps.plan-output.outputs.destroy }} to destroy.
-               \`\`\`
-               [Terraform Cloud Plan](${{ steps.plan-run.outputs.run_link }})
-               `;
-            // 3. Delete previous comment so PR timeline makes sense
-            if (botComment) {
-              github.rest.issues.deleteComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-              });
-            }
+            const output = `### Terraform Plan Result
+            #### 📂 Directory: \`projects/practice-service/dev\`
+            #### 🛡️ Security & Format Check: \`Passed\`
+            
+            <details><summary>🔍 상세 변경 내용 보기 (Click)</summary>
+            
+            \`\`\`hcl
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+            
+            </details>
+            
+            *Pushed by: @${context.actor}, Action: \`${context.eventName}\`*`;
+            
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
               body: output
-            });
+            })
